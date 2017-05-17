@@ -1,39 +1,38 @@
 #include "include/mysqlpool.h"
 
 
-static MysqlPool* mysqlpool_object = NULL;
+MysqlPool* MysqlPool::mysqlpool_object = NULL;
+std::mutex MysqlPool::objectlock;
+std::mutex MysqlPool::poollock;
 
 MysqlPool::MysqlPool() {}
+
 /*
- *无参的单例函数，各个线程获取唯一的实例化对象，实现对象的复用，最终实现连接池的复用
+ *配置数据库参数
  */
-static MysqlPool* MysqlPool::getMysqlPoolObject() {
-  if (mysqlpool_object == NULL) {
-    std::cout << "parameters invalid!" << std::endl;
-  }
-  return mysqlpool_object; 
+void MysqlPool::setParameter( const char*   mysqlhost,
+                              const char*   mysqluser,
+                              const char*   mysqlpwd,
+                              const char*   databasename,
+                              unsigned int  port,
+                              const char*   socket,
+                              unsigned long client_flag,
+                              unsigned int  max_connect ) {
+  _mysqlhost    = mysqlhost;
+  _mysqluser    = mysqluser;
+  _mysqlpwd     = mysqlpwd;
+  _databasename = databasename;
+  _port         = port;
+  _socket       = socket;
+  _client_flag  = client_flag;
+  MAX_CONNECT   = max_connect;
 }
+  
 /*
  *有参的单例函数，用于第一次获取连接池对象，初始化数据库信息。
  */
-static MysqlPool* MysqlPool::getMysqlPoolObject( const char*    mysqlhost,
-                                                 const char*    mysqluser,
-                                                 const char*    mysqlpwd,
-                                                 const char*    databasename,
-                                                 unsigned int   port,
-                                                 const char*    socket,
-                                                 unsigned long  client_flag,
-                                                 unsigned int   MAX_CONNECT ) {
+MysqlPool* MysqlPool::getMysqlPoolObject() {
   if (mysqlpool_object == NULL) { 
-    _mysqlhost    = mysqlhost;
-    _mysqluser    = mysqluser;
-    _mysqlpwd     = mysqlpwd;
-    _databasename = databasename;
-    _port         = port;
-    _socket       = socket;
-    _client_flag  = client_flag;
-    MAX_CONNECT   = MAX_CONNECT;
-    connect_count = 0;
     objectlock.lock();
     if (mysqlpool_object == NULL) {
       mysqlpool_object = new MysqlPool();
@@ -79,13 +78,19 @@ bool MysqlPool::isEmpty() {
 /*
  *获取当前连接池队列的队头
  */
-MYSQL* MysqlPool::frontPool() {
+MYSQL* MysqlPool::poolFront() {
   return mysqlpool.front();
+}
+/*
+ *
+ */
+unsigned int MysqlPool::poolSize() {
+  return mysqlpool.size();
 }
 /*
  *弹出当前连接池队列的队头
  */
-void MysqlPool::popPool() {
+void MysqlPool::poolPop() {
   mysqlpool.pop();
 }
 /*
@@ -97,31 +102,30 @@ void MysqlPool::popPool() {
  */
 MYSQL* MysqlPool::getOneConnect() {
   poollock.lock();
+  MYSQL *conn = NULL;
   if (!isEmpty()) {
-    while (!isEmpty() && mysql_ping(frontPool())) {
-      mysql_close(frontPool());
-      popPool();
+    while (!isEmpty() && mysql_ping(poolFront())) {
+      mysql_close(poolFront());
+      poolPop();
       connect_count--;
     }
     if (!isEmpty()) {
-      MYSQL *conn = frontPool();
-      popPool();
-      return conn;
+      conn = poolFront();
+      poolPop();
     } else {
       if (connect_count < MAX_CONNECT)
-        return createOneConnect(); 
+        conn = createOneConnect(); 
       else 
         std::cerr << "the number of mysql connections is too much!" << std::endl;
-        return NULL;
     }
   } else {
     if (connect_count < MAX_CONNECT)
-      return createOneConnect(); 
+      conn = createOneConnect(); 
     else 
       std::cerr << "the number of mysql connections is too much!" << std::endl;
-    return NULL;
   }
   poollock.unlock();
+  return conn;
 }
 /*
  *将有效的链接对象放回链接池队列中，以待下次的取用。
@@ -142,7 +146,7 @@ void MysqlPool::close(MYSQL* conn) {
  */
 std::map<const std::string,std::vector<const char*> >  MysqlPool::executeSql(const char* sql) {
   MYSQL* conn = getOneConnect();
-  std:: map<const std::string,std::vector<const char*> > results;
+  std::map<const std::string,std::vector<const char*> > results;
   if (conn) {
     if (mysql_query(conn,sql) == 0) {
       MYSQL_RES *res = mysql_store_result(conn);
@@ -177,9 +181,9 @@ std::map<const std::string,std::vector<const char*> >  MysqlPool::executeSql(con
  * 析构函数，将连接池队列中的连接全部关闭
  */
 MysqlPool::~MysqlPool() {
-  while (!mysqlpool.empty()) {
-    mysql_close(mysqlpool.front());
-    mysqlpool.pop();
+  while (poolSize() != 0) {
+    mysql_close(poolFront());
+    poolPop();
     connect_count--;
   }
 }
